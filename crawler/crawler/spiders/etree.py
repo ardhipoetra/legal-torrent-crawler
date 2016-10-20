@@ -17,7 +17,7 @@ class EtreeSpider(scrapy.Spider):
 
         for link in response.xpath("//a[contains(@href, '.torrent')]/@href"):
             dl = link.extract()
-            name = link.re(r'.*/.*/(.*)')
+            name = link.re(r'.*/.*/(.*)')[0]
 
             dl_link = "http://bt.etree.org/%s" %(dl)
             self.log("Download:%s filename:%s" %(dl_link, name))
