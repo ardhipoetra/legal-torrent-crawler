@@ -1,0 +1,3 @@
+# Dependabot triage PoC control: bad version triggering alerts
+# this one should keep open
+requests==2.25.0
