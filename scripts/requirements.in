@@ -1,4 +1,4 @@
 # Triage script dependencies. Compile with:
 #   pip-compile --generate-hashes --output-file=scripts/requirements.txt scripts/requirements.in
 # PoC: intentionally vulnerable pin (CVE-2020-14343, fixed in 5.4) to test Dependabot PRs.
-pyyaml==5.3.1
+pyyaml==6.0.3
