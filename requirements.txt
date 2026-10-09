@@ -1,0 +1,2 @@
+# Dependabot triage PoC control: this alert must stay OPEN (not under envs/local).
+requests==2.25.0

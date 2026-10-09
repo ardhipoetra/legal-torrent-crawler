@@ -1,0 +1,11 @@
+# Dependabot triage PoC rules (see scripts/dependabot_triage.py).
+rules:
+  - id: poc-envs-local
+    repo: legal-torrent-crawler
+    match:
+      manifest_path: "envs/local/**"
+    reason: tolerable_risk
+    comment: PoC - envs/local is a local-only environment, not deployed.
+    approved_by: Ardhi Hartono (PoC)
+    approved_on: 2026-10-09
+    expires: 2026-11-09

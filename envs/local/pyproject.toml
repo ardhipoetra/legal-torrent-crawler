@@ -1,0 +1,10 @@
+# Dependabot triage PoC: intentionally vulnerable pins in a "local" environment.
+# Alerts from this directory should be auto-dismissed by .github/dependabot-triage.yml.
+[project]
+name = "triage-poc-local"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "pillow==10.0.0",
+    "urllib3==1.26.4",
+]

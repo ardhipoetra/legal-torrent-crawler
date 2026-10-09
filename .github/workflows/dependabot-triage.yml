@@ -1,0 +1,56 @@
+name: Dependabot alert triage
+
+# PoC: dismisses open Dependabot alerts in THIS repository that match an
+# approved rule in .github/dependabot-triage.yml.
+#
+# Token: Actions repository secret DEPENDABOT_ALERTRW_TOKEN, a fine-grained PAT
+# with repository permission "Dependabot alerts: Read and write" on this repo.
+# The workflow GITHUB_TOKEN cannot dismiss alerts.
+on:
+  schedule:
+    - cron: "17 4 * * *"  # daily, 04:17 UTC
+  push:
+    branches: [master]
+    paths:
+      - .github/dependabot-triage.yml
+      - scripts/dependabot_triage.py
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Only report matching alerts, don't dismiss
+        type: boolean
+        default: true
+
+permissions: {}
+
+concurrency:
+  group: dependabot-triage
+  cancel-in-progress: false
+
+jobs:
+  triage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - run: pip install --require-hashes -r scripts/requirements.txt
+
+      - name: Triage
+        env:
+          GH_TOKEN: ${{ secrets.DEPENDABOT_ALERTRW_TOKEN }}
+          REPO: ${{ github.repository }}  # to triage another repo, set e.g. etalytics/opel
+          # Scheduled and push runs apply; manual runs are dry runs unless unticked.
+          APPLY: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_run == false }}
+        run: |
+          args=(--config .github/dependabot-triage.yml --repo "$REPO")
+          if [ "$APPLY" = "true" ]; then args+=(--apply); fi
+          python scripts/dependabot_triage.py "${args[@]}"
