@@ -1,0 +1,8 @@
+version: 2
+updates:
+  # Triage script dependencies (scripts/requirements.in -> requirements.txt,
+  # compiled with pip-compile --generate-hashes; Dependabot regenerates the hashes).
+  - package-ecosystem: pip
+    directory: /scripts
+    schedule:
+      interval: weekly
