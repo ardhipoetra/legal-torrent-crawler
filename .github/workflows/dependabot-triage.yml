@@ -3,8 +3,10 @@ name: Dependabot alert triage
 # PoC: dismisses open Dependabot alerts in THIS repository that match an
 # approved rule in .github/dependabot-triage-rules.yml.
 #
-# Token: Actions repository secret DEPENDABOT_ALERTRW_TOKEN, a fine-grained PAT
-# with repository permission "Dependabot alerts: Read and write" on this repo.
+# Token: short-lived GitHub App installation token. The App has only the
+# repository permission "Dependabot alerts: Read and write" and is installed on
+# the repos to triage. Actions secrets: DEPENDABOT_TRIAGE_APP_CLIENT_ID and
+# DEPENDABOT_TRIAGE_APP_PRIVATE_KEY.
 on:
   schedule:
     - cron: "14 5 * * *"  # daily, 05:14 UTC
@@ -43,9 +45,17 @@ jobs:
 
       - run: pip install --require-hashes -r triage/requirements.txt
 
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app-token
+        with:
+          client-id: ${{ secrets.DEPENDABOT_TRIAGE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.DEPENDABOT_TRIAGE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-vulnerability-alerts: write
+
       - name: Triage
         env:
-          GH_TOKEN: ${{ secrets.DEPENDABOT_ALERTRW_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           REPO: ${{ github.repository }}  # to triage another repo, set this to "owner/repo"
           # scheduled and push  => runs apply
           # manual runs         => dry runs unless unticked.
