@@ -12,7 +12,7 @@ on:
     branches: [master] #TODO: new repo = main
     paths:
       - .github/dependabot-triage-rules.yml
-      - scripts/dependabot_triage.py
+      - triage/dependabot_triage.py
   workflow_dispatch:
     inputs:
       dry_run:
@@ -41,7 +41,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - run: pip install --require-hashes -r scripts/requirements.txt
+      - run: pip install --require-hashes -r triage/requirements.txt
 
       - name: Triage
         env:
@@ -53,4 +53,4 @@ jobs:
         run: |
           args=(--config .github/dependabot-triage-rules.yml --repo "$REPO")
           if [ "$APPLY" = "true" ]; then args+=(--apply); fi
-          python scripts/dependabot_triage.py "${args[@]}"
+          python triage/dependabot_triage.py "${args[@]}"

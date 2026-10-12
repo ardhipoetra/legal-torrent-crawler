@@ -1,4 +1,4 @@
-# Dependabot triage PoC rules (see scripts/dependabot_triage.py).
+# Dependabot triage PoC rules (see triage/dependabot_triage.py).
 rules:
   - id: poc-envs-local
     repo: legal-torrent-crawler
