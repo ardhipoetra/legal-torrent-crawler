@@ -120,7 +120,10 @@ jobs:
         fi
         new_body=$(printf '%s\n' "$new_body" | sed 's/^          //')  # drop the YAML block indentation
         if [ -z "$bot_id" ]; then
-          if [ "$state" = pending ] && [ "$(jq -r .draft <<<"$pr_json")" != true ]; then comment_action=create; else comment_action=none; fi
+          # Create the comment as a reminder (pending, not on drafts) or as the record when a self-merge
+          # reason is used, so every self-merge leaves a "✅ … authorized self merge" comment to read later.
+          if { [ "$state" = pending ] && [ "$(jq -r .draft <<<"$pr_json")" != true ]; } || { [ "$state" = success ] && [ -z "$approvers" ]; }; then
+            comment_action=create; else comment_action=none; fi
         elif [ "$bot_body" != "$new_body" ]; then comment_action=update; else comment_action=none; fi
 
         if [ "${DRY_RUN:-}" = 1 ]; then
