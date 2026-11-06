@@ -1,0 +1,28 @@
+# Per-repo caller: .github/workflows/self-merge-reason.yml in every repo the ruleset targets.
+# Must be on the default branch BEFORE the ruleset is switched on for that repo, otherwise the
+# required check never reports and every PR there is blocked.
+name: self-merge-reason
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, edited]
+  pull_request_review:
+    types: [submitted, dismissed]
+  issue_comment:
+    types: [created, edited]
+
+concurrency:
+  group: self-merge-reason-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  self-merge-reason:
+    # issue_comment also fires on plain issues; "edited" PRs only matter when the description changed
+    if: >-
+      (github.event_name != 'issue_comment' || github.event.issue.pull_request) &&
+      (github.event.action != 'edited' || github.event_name != 'pull_request' || github.event.changes.body)
+    uses: ./.github/workflows/self-merge-reason-reusable.yml
+    permissions:
+      checks: write
+      pull-requests: read
+      contents: read

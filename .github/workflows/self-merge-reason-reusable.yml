@@ -1,0 +1,82 @@
+# Reusable workflow: put this file in a central repo (e.g. etalytics/.github) under .github/workflows/
+# and allow access from other org repos (central repo > Settings > Actions > General >
+# "Accessible from repositories in the 'etalytics' organization").
+#
+# It posts a check run named "self-merge-reason" on the PR head commit:
+#   success      - the PR has an approval from someone other than the author, or
+#                  the PR description / a PR comment contains "Self-merge reason: <at least 15 chars>"
+#   in_progress  - neither yet (shows as pending, so the merge stays blocked without a red X)
+# A ruleset WITHOUT bypass actors that requires the "self-merge-reason" check then makes
+# even people who may bypass the approval rule write a reason before they can merge.
+name: self-merge-reason
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: Runner label (use a self-hosted label to save Actions minutes)
+        type: string
+        default: ubuntu-latest
+
+permissions: {}
+
+jobs:
+  evaluate:
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 2
+    permissions:
+      checks: write
+      pull-requests: read
+      contents: read
+    steps:
+      - name: Evaluate approval or self-merge reason
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number || github.event.issue.number }}
+          MIN_REASON_CHARS: "15"
+        run: |
+          set -euo pipefail
+          pr_json=$(gh api "repos/$REPO/pulls/$PR")
+          if [ "$(jq -r .state <<<"$pr_json")" != open ]; then echo "PR #$PR is not open, nothing to do"; exit 0; fi
+          head_sha=$(jq -r .head.sha <<<"$pr_json")
+          author=$(jq -r .user.login <<<"$pr_json")
+
+          # Latest non-comment review per reviewer, author excluded; approved if any of them is APPROVED.
+          approvers=$(gh api --paginate "repos/$REPO/pulls/$PR/reviews" \
+              --jq '.[] | select(.state != "COMMENTED") | [.user.login, .state] | @tsv' \
+            | awk -F'\t' -v a="$author" '$1 != a { last[$1] = $2 } END { for (u in last) if (last[u] == "APPROVED") printf "%s ", u }')
+
+          # "Self-merge reason: ..." line; HTML comments (template placeholders) and markdown emphasis ignored.
+          extract() {
+            perl -0777 -pe 's/<!--.*?-->//gs' \
+              | grep -iE '^[[:space:]>*_-]*self-merge reason[[:space:]*_]*:' \
+              | tail -n 1 | sed -E 's/^[^:]*:[[:space:]*_]*//; s/[[:space:]]+$//' || true
+          }
+          reason=$(jq -r '.body // ""' <<<"$pr_json" | extract)
+          if [ -z "$reason" ]; then
+            reason=$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
+                       --jq '.[] | select(.user.type == "User") | .body' | extract)
+          fi
+
+          if [ -n "$approvers" ]; then
+            args=(-f status=completed -f conclusion=success
+                  -f "output[title]=Approved by ${approvers% }"
+                  -f "output[summary]=Reviewed change, no self-merge reason needed.")
+          elif [ "${#reason}" -ge "$MIN_REASON_CHARS" ]; then
+            args=(-f status=completed -f conclusion=success
+                  -f "output[title]=Self-merge reason given"
+                  -f "output[summary]=$reason")
+          else
+            args=(-f status=in_progress
+                  -f "output[title]=Needs an approval or a self-merge reason"
+                  -f "output[summary]=Get an approving review, or add a line 'Self-merge reason: <why this cannot wait for a review>' (at least ${MIN_REASON_CHARS} characters) to the PR description or a PR comment.")
+          fi
+
+          if [ "${DRY_RUN:-}" = 1 ]; then
+            printf 'DRY RUN %s#%s head=%s author=%s approvers=[%s] reason=[%s]\n' "$REPO" "$PR" "${head_sha:0:7}" "$author" "${approvers% }" "$reason"
+            printf '  check: %s\n' "${args[*]}"
+            exit 0
+          fi
+          gh api -X POST "repos/$REPO/check-runs" -f name=self-merge-reason -f head_sha="$head_sha" "${args[@]}" >/dev/null
+          echo "self-merge-reason: ${args[*]:0:4}"
