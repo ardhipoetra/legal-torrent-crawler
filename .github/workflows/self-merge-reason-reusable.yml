@@ -2,10 +2,10 @@
 # and allow access from other org repos (central repo > Settings > Actions > General >
 # "Accessible from repositories in the 'etalytics' organization").
 #
-# It posts a check run named "self-merge-reason" on the PR head commit:
+# It posts a commit status named "self-merge-reason" on the PR head commit:
 #   success      - the PR has an approval from someone other than the author, or
 #                  the PR description / a PR comment contains "Self-merge reason: <at least 15 chars>"
-#   in_progress  - neither yet (shows as pending, so the merge stays blocked without a red X)
+#   pending      - neither yet (yellow, so the merge stays blocked without a red X)
 # A ruleset WITHOUT bypass actors that requires the "self-merge-reason" check then makes
 # even people who may bypass the approval rule write a reason before they can merge.
 name: self-merge-reason
@@ -25,7 +25,7 @@ jobs:
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 2
     permissions:
-      checks: write
+      statuses: write
       pull-requests: read
       contents: read
     steps:
@@ -59,24 +59,22 @@ jobs:
                        --jq '.[] | select(.user.type == "User") | .body' | extract)
           fi
 
+          # A commit status, not a check run: the latest status per context wins and can go back to
+          # pending. (Pilot 2026-11-06: rulesets kept reporting an API-created check run as "expected".)
           if [ -n "$approvers" ]; then
-            args=(-f status=completed -f conclusion=success
-                  -f "output[title]=Approved by ${approvers% }"
-                  -f "output[summary]=Reviewed change, no self-merge reason needed.")
+            state=success; desc="Approved by ${approvers% }"
           elif [ "${#reason}" -ge "$MIN_REASON_CHARS" ]; then
-            args=(-f status=completed -f conclusion=success
-                  -f "output[title]=Self-merge reason given"
-                  -f "output[summary]=$reason")
+            state=success; desc="Reason: $reason"
           else
-            args=(-f status=in_progress
-                  -f "output[title]=Needs an approval or a self-merge reason"
-                  -f "output[summary]=Get an approving review, or add a line 'Self-merge reason: <why this cannot wait for a review>' (at least ${MIN_REASON_CHARS} characters) to the PR description or a PR comment.")
+            state=pending; desc="Needs an approval or a 'Self-merge reason: ...' line (${MIN_REASON_CHARS}+ chars)"
           fi
+          desc=${desc:0:140}  # GitHub limit for status descriptions
 
           if [ "${DRY_RUN:-}" = 1 ]; then
             printf 'DRY RUN %s#%s head=%s author=%s approvers=[%s] reason=[%s]\n' "$REPO" "$PR" "${head_sha:0:7}" "$author" "${approvers% }" "$reason"
-            printf '  check: %s\n' "${args[*]}"
+            printf '  status: %s | %s\n' "$state" "$desc"
             exit 0
           fi
-          gh api -X POST "repos/$REPO/check-runs" -f name=self-merge-reason -f head_sha="$head_sha" "${args[@]}" >/dev/null
-          echo "self-merge-reason: ${args[*]:0:4}"
+          gh api -X POST "repos/$REPO/statuses/$head_sha" -f context=self-merge-reason -f state="$state" \
+            -f description="$desc" -f target_url="${GITHUB_SERVER_URL}/${REPO}/actions/runs/${GITHUB_RUN_ID}" >/dev/null
+          echo "self-merge-reason: $state | $desc"

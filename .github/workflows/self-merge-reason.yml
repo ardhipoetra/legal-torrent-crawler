@@ -23,6 +23,6 @@ jobs:
       (github.event.action != 'edited' || github.event_name != 'pull_request' || github.event.changes.body)
     uses: ./.github/workflows/self-merge-reason-reusable.yml
     permissions:
-      checks: write
+      statuses: write
       pull-requests: read
       contents: read
