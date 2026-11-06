@@ -5,7 +5,8 @@
 # It posts a commit status named "self-merge-reason" on the PR head commit:
 #   success      - the PR has an approval from someone other than the author, or
 #                  the PR description / a PR comment contains "Self-merge reason: <at least 15 chars>"
-#   pending      - neither yet (yellow, so the merge stays blocked without a red X)
+#   pending      - neither yet (yellow, so the merge stays blocked without a red X); also posts one
+#                  reminder comment (not on drafts) and edits it once the PR is approved or has a reason
 # A ruleset WITHOUT bypass actors that requires the "self-merge-reason" check then makes
 # even people who may bypass the approval rule write a reason before they can merge.
 name: self-merge-reason
@@ -26,7 +27,7 @@ jobs:
     timeout-minutes: 2
     permissions:
       statuses: write
-      pull-requests: read
+      pull-requests: write
       contents: read
     steps:
       - name: Evaluate approval or self-merge reason
@@ -53,10 +54,16 @@ jobs:
               | grep -iE '^[[:space:]>*_-]*self-merge reason[[:space:]*_]*:' \
               | tail -n 1 | sed -E 's/^[^:]*:[[:space:]*_]*//; s/[[:space:]]+$//' || true
           }
+          comments=$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
+                       --jq '.[] | {id, login: .user.login, type: .user.type, body}' | jq -s .)
           reason=$(jq -r '.body // ""' <<<"$pr_json" | extract)
+          reason_src="the PR description"
           if [ -z "$reason" ]; then
-            reason=$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
-                       --jq '.[] | select(.user.type == "User") | .body' | extract)
+            # Comments by people only (the bot's own reminder is type "Bot"); the last matching one wins.
+            while IFS=$'\t' read -r login body64; do
+              r=$(printf '%s' "$body64" | base64 -d | extract)
+              if [ -n "$r" ]; then reason=$r; reason_src="a comment by @$login"; fi
+            done < <(jq -r '.[] | select(.type == "User") | [.login, (.body | @base64)] | @tsv' <<<"$comments")
           fi
 
           # A commit status, not a check run: the latest status per context wins and can go back to
@@ -70,11 +77,42 @@ jobs:
           fi
           desc=${desc:0:140}  # GitHub limit for status descriptions
 
+          # One reminder comment per PR: posted while pending (not on drafts), edited once resolved.
+          marker='<!-- self-merge-reason-bot -->'
+          bot=$(jq -r --arg m "$marker" '[.[] | select(.type == "Bot" and (.body | contains($m)))][0]
+                                          | if . == null then "" else "\(.id)\t\(.body | @base64)" end' <<<"$comments")
+          bot_id=${bot%%$'\t'*}
+          bot_body=$( [ -n "$bot" ] && printf '%s' "${bot#*$'\t'}" | base64 -d || true )
+          if [ "$state" = pending ]; then
+            new_body="$marker
+          **Merging without a review?** This repository needs an approval from someone other than the author, or a reason.
+          If you merge this yourself, add this line to the PR description or a comment:
+
+          \`Self-merge reason: <why this can't wait for a review>\` (at least ${MIN_REASON_CHARS} characters)
+
+          If someone reviews this PR, you can ignore this."
+          elif [ -n "$approvers" ]; then
+            new_body="$marker
+          ✅ Approved by $(printf '@%s ' $approvers | sed 's/ $//; s/ /, /g'). No self-merge reason needed."
+          else
+            new_body="$marker
+          ✅ **Self-merge reason** (from ${reason_src}): ${reason:0:500}"
+          fi
+          new_body=$(printf '%s\n' "$new_body" | sed 's/^          //')  # drop the YAML block indentation
+          if [ -z "$bot_id" ]; then
+            if [ "$state" = pending ] && [ "$(jq -r .draft <<<"$pr_json")" != true ]; then comment_action=create; else comment_action=none; fi
+          elif [ "$bot_body" != "$new_body" ]; then comment_action=update; else comment_action=none; fi
+
           if [ "${DRY_RUN:-}" = 1 ]; then
-            printf 'DRY RUN %s#%s head=%s author=%s approvers=[%s] reason=[%s]\n' "$REPO" "$PR" "${head_sha:0:7}" "$author" "${approvers% }" "$reason"
-            printf '  status: %s | %s\n' "$state" "$desc"
+            printf 'DRY RUN %s#%s head=%s author=%s approvers=[%s] reason=[%s] (%s)\n' "$REPO" "$PR" "${head_sha:0:7}" "$author" "${approvers% }" "$reason" "$reason_src"
+            printf '  status: %s | %s\n  comment: %s\n' "$state" "$desc" "$comment_action"
+            [ "$comment_action" = none ] || printf '%s\n' "$new_body" | sed 's/^/    | /'
             exit 0
           fi
           gh api -X POST "repos/$REPO/statuses/$head_sha" -f context=self-merge-reason -f state="$state" \
             -f description="$desc" -f target_url="${GITHUB_SERVER_URL}/${REPO}/actions/runs/${GITHUB_RUN_ID}" >/dev/null
-          echo "self-merge-reason: $state | $desc"
+          case $comment_action in
+            create) gh api -X POST "repos/$REPO/issues/$PR/comments" -f body="$new_body" >/dev/null ;;
+            update) gh api -X PATCH "repos/$REPO/issues/comments/$bot_id" -f body="$new_body" >/dev/null ;;
+          esac
+          echo "self-merge-reason: $state | $desc | comment: $comment_action"
