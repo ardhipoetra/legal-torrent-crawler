@@ -56,13 +56,17 @@ jobs:
           }
           comments=$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
                        --jq '.[] | {id, login: .user.login, type: .user.type, body}' | jq -s .)
+          # The example text from the reminder comment is not a reason.
+          real() { case "${1,,}" in "" | *"why this can't wait for a review"*) return 1 ;; esac; }
           reason=$(jq -r '.body // ""' <<<"$pr_json" | extract)
+          real "$reason" || reason=""
           reason_src="the PR description"
           if [ -z "$reason" ]; then
-            # Comments by people only (the bot's own reminder is type "Bot"); the last matching one wins.
+            # Comments by people only: the reminder stays type "Bot" even after a person edits it,
+            # so a reason typed into the reminder never counts. The last matching comment wins.
             while IFS=$'\t' read -r login body64; do
               r=$(printf '%s' "$body64" | base64 -d | extract)
-              if [ -n "$r" ]; then reason=$r; reason_src="a comment by @$login"; fi
+              if real "$r"; then reason=$r; reason_src="a comment by @$login"; fi
             done < <(jq -r '.[] | select(.type == "User") | [.login, (.body | @base64)] | @tsv' <<<"$comments")
           fi
 
@@ -86,11 +90,13 @@ jobs:
           if [ "$state" = pending ]; then
             new_body="$marker
           **Merging without a review?** This repository needs an approval from someone other than the author, or a reason.
-          If you merge this yourself, add this line to the PR description or a comment:
+          If you merge this yourself, copy this line into the PR description or a **new comment**, then add why this can't wait for a review (at least ${MIN_REASON_CHARS} characters):
 
-          \`Self-merge reason: <why this can't wait for a review>\` (at least ${MIN_REASON_CHARS} characters)
+          \`\`\`
+          Self-merge reason:
+          \`\`\`
 
-          If someone reviews this PR, you can ignore this."
+          Editing this comment does not count (it is reset automatically). If someone reviews this PR, you can ignore this."
           elif [ -n "$approvers" ]; then
             new_body="$marker
           ✅ Approved by $(printf '@%s ' $approvers | sed 's/ $//; s/ /, /g'). No self-merge reason needed."
