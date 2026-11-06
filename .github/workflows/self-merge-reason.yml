@@ -28,6 +28,8 @@ concurrency:
 permissions: {}
 jobs:
   self-merge-reason:
+    # Skip comments on plain issues (issue_comment also fires there).
+    if: github.event_name != 'issue_comment' || github.event.issue.pull_request
     runs-on: ubuntu-latest
     timeout-minutes: 2
     permissions:
@@ -43,49 +45,40 @@ jobs:
         MIN_REASON_CHARS: '15'
       run: |
         set -euo pipefail
-        pr_json=$(gh api "repos/$REPO/pulls/$PR")
-        if [ "$(jq -r .state <<<"$pr_json")" != open ]; then echo "PR #$PR is not open, nothing to do"; exit 0; fi
-        head_sha=$(jq -r .head.sha <<<"$pr_json")
-        author=$(jq -r .user.login <<<"$pr_json")
-
-        # Latest non-comment review per reviewer, author excluded; approved if any of them is APPROVED.
-        approvers=$(gh api --paginate "repos/$REPO/pulls/$PR/reviews" \
-            --jq '.[] | select(.state != "COMMENTED") | [.user.login, .state] | @tsv' \
-          | awk -F'\t' -v a="$author" '$1 != a { last[$1] = $2 } END { for (u in last) if (last[u] == "APPROVED") printf "%s ", u }')
-
-        # "Self-merge reason: ..." line; HTML comments (template placeholders) and markdown emphasis ignored.
-        extract() {
-          perl -0777 -pe 's/<!--.*?-->//gs' \
-            | grep -iE '^[[:space:]>*_-]*self-merge reason[[:space:]*_]*:' \
-            | tail -n 1 | sed -E 's/^[^:]*:[[:space:]*_]*//; s/[[:space:]]+$//' || true
-        }
-        # Description editor and comments in one GraphQL call: "editor" is whoever last edited the text
-        # (null if never edited), so the reason is credited to the person who actually wrote it.
+        # One GraphQL call for everything: PR state and head commit, the description and its last editor,
+        # each reviewer's latest approve/reject verdict, and the comments with their last editors.
         q='query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){pullRequest(number:$n){
+            state isDraft headRefOid body
             author{login ...on User{name}} editor{login ...on User{name}}
+            latestOpinionatedReviews(first:100){nodes{state author{login}}}
             comments(last:100){nodes{databaseId body author{__typename login ...on User{name}} editor{login ...on User{name}}}}}}}'
-        gql=$(gh api graphql -f query="$q" -F owner="${REPO%%/*}" -F name="${REPO#*/}" -F n="$PR" --jq .data.repository.pullRequest)
-        WHO='def who: (. // {login: "ghost"}) | if (.name // "") != "" then "\(.name) (@\(.login))" else "@\(.login)" end;'
-        # The example text from the reminder comment is not a reason.
-        real() { case "${1,,}" in "" | *"why this can't wait for a review"*) return 1 ;; esac; }
-        reason=$(jq -r '.body // ""' <<<"$pr_json" | extract)
-        real "$reason" || reason=""
-        reason_src="the PR description"
-        reason_by=$(jq -r "$WHO"' (.editor // .author) | who' <<<"$gql")
-        if [ -z "$reason" ]; then
-          # Comments by people only: the reminder stays type "Bot" even after a person edits it,
-          # so a reason typed into the reminder never counts. The last matching comment wins.
-          while IFS=$'\t' read -r by body64; do
-            r=$(printf '%s' "$body64" | base64 -d | extract)
-            if real "$r"; then reason=$r; reason_src="a comment"; reason_by=$by; fi
-          done < <(jq -r "$WHO"' .comments.nodes[] | select(.author.__typename == "User")
-                            | [((.editor // .author) | who), (.body | @base64)] | @tsv' <<<"$gql")
-        fi
+        pr=$(gh api graphql -f query="$q" -F owner="${REPO%%/*}" -F name="${REPO#*/}" -F n="$PR" --jq .data.repository.pullRequest)
+        if [ "$(jq -r .state <<<"$pr")" != OPEN ]; then echo "PR #$PR is not open, nothing to do"; exit 0; fi
+
+        # approved: someone other than the author whose latest verdict is APPROVED.
+        # reason: the "Self-merge reason: ..." line from the description, else from the last comment written by a
+        # person (the bot's own comment never counts, even if someone edits it). Text inside <!-- --> and the
+        # reminder's example text are ignored. "editor" is whoever last edited that text, so the reason is
+        # credited to the person who wrote it.
+        IFS=$'\x1f' read -r approved reason reason_by reason_src < <(jq -r '
+          def who: (. // {login: "ghost"}) | if (.name // "") != "" then "\(.name) (@\(.login))" else "@\(.login)" end;
+          def reason: gsub("<!--[\\s\\S]*?-->"; "")
+            | [scan("(?i)(?:^|\\n)[ \\t>*_-]*self-merge reason[ \\t*_]*:[ \\t*_]*([^\\r\\n]*)")[0] | sub("\\s+$"; "")]
+            | map(select(. != "" and (test("why this can.t wait for a review"; "i") | not)))
+            | last // "";
+          .author.login as $author
+          | ([.latestOpinionatedReviews.nodes[] | select(.state == "APPROVED" and .author.login != $author)] | length > 0) as $approved
+          | ((.body // "" | reason) as $r
+             | if $r != "" then {r: $r, by: ((.editor // .author) | who), src: "the PR description"}
+               else [.comments.nodes[] | select(.author.__typename == "User")
+                     | {r: (.body | reason), by: ((.editor // .author) | who), src: "a comment"} | select(.r != "")]
+                    | last // {r: "", by: "", src: ""} end) as $pick
+          | [$approved, $pick.r, $pick.by, $pick.src] | map(tostring) | join("\u001f")' <<<"$pr")
 
         # A commit status, not a check run: the latest status per context wins and can go back to
         # pending. (Pilot 2026-11-06: rulesets kept reporting an API-created check run as "expected".)
-        if [ -n "$approvers" ]; then
-          state=success; desc="Approved by ${approvers% }"
+        if [ "$approved" = true ]; then
+          state=success; desc="Approved by another contributor"
         elif [ "${#reason}" -ge "$MIN_REASON_CHARS" ]; then
           state=success; desc="Authorized by ${reason_by}: $reason"
         else
@@ -93,12 +86,11 @@ jobs:
         fi
         desc=${desc:0:140}  # GitHub limit for status descriptions
 
-        # One reminder comment per PR: posted while pending (not on drafts), edited once resolved.
+        # One bot comment per PR, found by its hidden marker: the reminder while pending, the record once resolved.
         marker='<!-- self-merge-reason-bot -->'
-        bot=$(jq -r --arg m "$marker" '[.comments.nodes[] | select(.author.__typename == "Bot" and (.body | contains($m)))][0]
-                                        | if . == null then "" else "\(.databaseId)\t\(.body | @base64)" end' <<<"$gql")
-        bot_id=${bot%%$'\t'*}
-        bot_body=$( [ -n "$bot" ] && printf '%s' "${bot#*$'\t'}" | base64 -d || true )
+        bot='first(.comments.nodes[] | select(.author.__typename == "Bot" and (.body | contains($m))))'
+        bot_id=$(jq -r --arg m "$marker" "($bot | .databaseId) // \"\"" <<<"$pr")
+        bot_body=$(jq -r --arg m "$marker" "($bot | .body) // \"\"" <<<"$pr")
         if [ "$state" = pending ]; then
           new_body="$marker
         **Merging without a review?** This repository needs an approval from someone other than the author, or a reason.
@@ -109,34 +101,26 @@ jobs:
         \`\`\`
 
         Editing this comment does not count (it is reset automatically). If someone reviews this PR, you can ignore this."
-        elif [ -n "$approvers" ]; then
+        elif [ "$approved" = true ]; then
           new_body="$marker
-        ✅ Approved by $(printf '@%s ' $approvers | sed 's/ $//; s/ /, /g'). No self-merge reason needed."
+        ✅ Approved by another contributor. No self-merge reason needed."
         else
           new_body="$marker
         ✅ ${reason_by} authorized self merge due to reason: ${reason:0:500}
 
         <sub>Reason taken from ${reason_src}.</sub>"
         fi
-        new_body=$(printf '%s\n' "$new_body" | sed 's/^          //')  # drop the YAML block indentation
         if [ -z "$bot_id" ]; then
-          # Create the comment as a reminder (pending, not on drafts) or as the record when a self-merge
-          # reason is used, so every self-merge leaves a "✅ … authorized self merge" comment to read later.
-          if { [ "$state" = pending ] && [ "$(jq -r .draft <<<"$pr_json")" != true ]; } || { [ "$state" = success ] && [ -z "$approvers" ]; }; then
+          # Create it as the reminder (pending, not on drafts) or, when a self-merge reason is used, as the record,
+          # so every self-merge leaves a "✅ … authorized self merge" comment to read later.
+          if { [ "$state" = pending ] && [ "$(jq -r .isDraft <<<"$pr")" != true ]; } || { [ "$state" = success ] && [ "$approved" != true ]; }; then
             comment_action=create; else comment_action=none; fi
         elif [ "$bot_body" != "$new_body" ]; then comment_action=update; else comment_action=none; fi
 
-        if [ "${DRY_RUN:-}" = 1 ]; then
-          printf 'DRY RUN %s#%s head=%s author=%s approvers=[%s] reason=[%s] by=[%s] (%s)\n' "$REPO" "$PR" "${head_sha:0:7}" "$author" "${approvers% }" "$reason" "$reason_by" "$reason_src"
-          printf '  status: %s | %s\n  comment: %s\n' "$state" "$desc" "$comment_action"
-          [ "$comment_action" = none ] || printf '%s\n' "$new_body" | sed 's/^/    | /'
-          exit 0
-        fi
-        gh api -X POST "repos/$REPO/statuses/$head_sha" -f context=self-merge-reason -f state="$state" \
+        gh api -X POST "repos/$REPO/statuses/$(jq -r .headRefOid <<<"$pr")" -f context=self-merge-reason -f state="$state" \
           -f description="$desc" -f target_url="${GITHUB_SERVER_URL}/${REPO}/actions/runs/${GITHUB_RUN_ID}" >/dev/null
         case $comment_action in
           create) gh api -X POST "repos/$REPO/issues/$PR/comments" -f body="$new_body" >/dev/null ;;
           update) gh api -X PATCH "repos/$REPO/issues/comments/$bot_id" -f body="$new_body" >/dev/null ;;
         esac
         echo "self-merge-reason: $state | $desc | comment: $comment_action"
-    if: (github.event_name != 'issue_comment' || github.event.issue.pull_request) && (github.event.action != 'edited' || github.event_name != 'pull_request' || github.event.changes.body)
